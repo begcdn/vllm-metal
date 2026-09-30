@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -91,6 +91,15 @@ def _kernel_inputs(ctx: PagedAttentionContext) -> MLAKernelMetadata:
 # bf16, 2k/8k cached context.
 _MATERIALIZED_CROSSOVER_MARGIN = 1.25
 _MATERIALIZED_THRESHOLD_ROUNDING = 64
+
+# Batched absorbed decode (_absorbed_decode_batch): one padded gather + one
+# SDPA amortizes the per-request dispatches when many one-token rows share a
+# short context, but loses when a long context inflates the padded gather.
+# Rows past the per-row context cap keep the per-segment loop so one long
+# context cannot pad the whole batch; the token cap bounds the padded volume.
+_DECODE_BATCH_MIN_ROWS = 16
+_DECODE_BATCH_MAX_CTX = 1024
+_DECODE_BATCH_MAX_TOKENS = 65536
 
 
 def materialized_min_new_tokens_with_past(
@@ -417,6 +426,82 @@ class MLAPagedAttentionWrapper(nn.Module):
         )
         return out.transpose(0, 2, 1, 3).reshape(1, num_new, -1)
 
+    def _absorbed_decode_batch(
+        self,
+        inner: nn.Module,
+        latent_cache: MLAPagedLatentCache,
+        layer_idx: int,
+        q_nope: mx.array,  # [1, nheads, seq, qk_nope_head_dim]
+        q_pe: mx.array,  # [1, nheads, seq, qk_rope_head_dim] (post-RoPE)
+        ctx: Any,
+        req_indices: list[int],
+    ) -> mx.array:
+        """Absorbed attention for single-token decode segments, batched: one
+        padded cache gather and one SDPA for the whole group instead of one
+        SDPA dispatch per request. Each decode row attends to its own context
+        (padded columns masked out). Returns [n, nheads, 1, v_head_dim] in
+        ``req_indices`` order.
+
+        Only valid for absorbed models (embed_q/unembed_out) and num_new==1
+        segments — multi-token segments need the per-segment causal mask."""
+        n = len(req_indices)
+        kv_lora_rank = inner.kv_lora_rank
+        kernel = _kernel_inputs(ctx)
+        max_ctx = max(ctx.context_lens[i] for i in req_indices)
+
+        idx = mx.array(req_indices, dtype=mx.int32)
+        # Padded block tables are built once per forward (#821); padding
+        # entries point at block 0 and are masked out below. Slice to the
+        # subset's own block span so co-scheduled long-context segments don't
+        # inflate the gather.
+        n_blocks = math.ceil(max_ctx / latent_cache.block_size)
+        all_latent = latent_cache.latent_caches[layer_idx][
+            kernel.block_tables[idx][:, :n_blocks]
+        ].reshape(n, -1, latent_cache.latent_dim)[:, :max_ctx]
+        all_kv_norm = all_latent[..., :kv_lora_rank]
+        all_k_pe = all_latent[..., kv_lora_rank:]
+
+        # cu_seqlens_q is already on-device from _kernel_inputs; gather the
+        # decode rows' packed start offsets instead of re-uploading them.
+        starts = mx.take(kernel.cu_seqlens_q, idx)
+        rq_nope = mx.take(q_nope[0], starts, axis=1).transpose(1, 0, 2)[:, :, None, :]
+        rq_pe = mx.take(q_pe[0], starts, axis=1).transpose(1, 0, 2)[:, :, None, :]
+
+        cols = mx.arange(max_ctx).reshape(1, -1)
+        valid = (
+            cols < kernel.context_lens[idx].astype(mx.int32).reshape(-1, 1)
+        ).reshape(n, 1, 1, max_ctx)
+        return self._apply_mla_attention(
+            rq_nope=rq_nope,
+            rq_pe=rq_pe,
+            all_kv_norm=all_kv_norm,
+            k_pe=all_k_pe.reshape(n, 1, max_ctx, inner.qk_rope_head_dim),
+            causal_mask=valid,
+        )  # [n, nheads, 1, v_head_dim]
+
+    def _decode_batch_rows(self, ctx: Any) -> list[int] | None:
+        """Request indices of the single-token decode segments worth one
+        batched absorbed pass: rows whose context fits under the padded-gather
+        cap, when enough of them batch to amortize the dispatches.  ``None``
+        for non-absorbed models (kv_b_proj attention is per-head already) or
+        when the batching gates reject.  Rows left out keep the per-segment
+        loop — one long context must not inflate the padded gather for the
+        whole batch.  Routing never marks decode rows, so every index
+        returned here is an unrouted segment wherever it's used."""
+        if not self._is_absorbed:
+            return None
+        cu = ctx.cu_seqlens
+        idx = [
+            i
+            for i, ctx_len in enumerate(ctx.context_lens)
+            if cu[i + 1] - cu[i] == 1 and ctx_len <= _DECODE_BATCH_MAX_CTX
+        ]
+        if len(idx) < _DECODE_BATCH_MIN_ROWS:
+            return None
+        if len(idx) * max(ctx.context_lens[i] for i in idx) > _DECODE_BATCH_MAX_TOKENS:
+            return None
+        return idx
+
     def _materialized_prefill(
         self,
         inner: nn.Module,
@@ -466,15 +551,29 @@ class MLAPagedAttentionWrapper(nn.Module):
         queries = mx.concatenate([q_nope[0], q_pe[0]], axis=-1)  # [nheads, seq, qk]
 
         cu = ctx.cu_seqlens
-        outs = []
+        outs: list[mx.array | None] = [None] * len(ctx.context_lens)
+        # Decode rows packed next to a prefill take one batched absorbed pass
+        # instead of one SDPA dispatch each (same math as the per-segment
+        # loop), when the batching gates accept them. Unrouted rows outside
+        # the gate — decode rows over the context cap, small chunks — fall
+        # through to the per-segment absorbed loop below.
+        decode_idx = self._decode_batch_rows(ctx)
+        if decode_idx is not None:
+            dec = self._absorbed_decode_batch(
+                inner, latent_cache, layer_idx, q_nope, q_pe, ctx, decode_idx
+            )  # [d, nheads, 1, v_head_dim]
+            for j, i in enumerate(decode_idx):
+                outs[i] = dec[j].reshape(1, nheads, inner.v_head_dim)
         for i, ctx_len in enumerate(ctx.context_lens):  # per-request causal MHA
             s, e = cu[i], cu[i + 1]
             num_new = e - s
+            if outs[i] is not None:
+                continue
             if not routed[i]:
                 out = self._absorbed_segment(
                     inner, latent_cache, layer_idx, q_nope, q_pe, ctx, i
                 )  # [1, num_new, nheads * v_head_dim]
-                outs.append(out[0].reshape(num_new, nheads, inner.v_head_dim))
+                outs[i] = out[0].reshape(num_new, nheads, inner.v_head_dim)
                 continue
             past = ctx_len - num_new
             k_i = keys[:, s:e]
@@ -515,8 +614,13 @@ class MLAPagedAttentionWrapper(nn.Module):
                 scale=scale,
                 mask="causal",  # lower-right aligned: covers past + new keys
             )  # [1, nheads, num_new, v_head_dim]
-            outs.append(out[0].transpose(1, 0, 2))  # [num_new, nheads, v_head_dim]
-        final = mx.concatenate(outs, axis=0) if len(outs) > 1 else outs[0]
+            outs[i] = out[0].transpose(1, 0, 2)  # [num_new, nheads, v_head_dim]
+        # Every request index is covered above (batched decode, unrouted
+        # absorbed, or materialized); fail loudly if that invariant breaks
+        # rather than silently dropping a segment's tokens.
+        assert all(o is not None for o in outs)
+        filled = cast(list[mx.array], outs)
+        final = mx.concatenate(filled, axis=0) if len(filled) > 1 else filled[0]
         return final.reshape(1, seq_len, nheads * inner.v_head_dim)
 
     def _apply_absorbed_mla_attention(
@@ -541,9 +645,11 @@ class MLAPagedAttentionWrapper(nn.Module):
 
         # Nope branch: embed_q absorbs q_nope into kv_lora_rank space;
         # kv_norm is shared across heads as k=v (single-head broadcast).
-        ctx_len = all_kv_norm.shape[0]
+        # Leading dims (none, or a request axis from _absorbed_decode_batch)
+        # are preserved.
+        ctx_len = all_kv_norm.shape[-2]
         rq_nope_proj = inner.embed_q(rq_nope)
-        kv = all_kv_norm.reshape(1, 1, ctx_len, inner.kv_lora_rank)
+        kv = all_kv_norm.reshape(-1, 1, ctx_len, inner.kv_lora_rank)
 
         out = scaled_dot_product_attention(
             rq_nope_proj, kv, kv, cache=None, scale=scale, mask=pe_scores
@@ -687,14 +793,33 @@ class MLAPagedAttentionWrapper(nn.Module):
             )
             return inner.o_proj(final)
 
-        # Per-request absorbed attention; block tables are converted once per
-        # forward and reused across layers (``_block_table_rows``).
-        outputs = [
-            self._absorbed_segment(
-                inner, latent_cache, layer_idx, q_nope, q_pe, ctx, req_idx
+        # Short-context one-token decode rows take one padded batched pass
+        # (one gather + one SDPA) instead of one SDPA dispatch each; padded
+        # columns are masked. Longer decode rows and multi-token segments
+        # keep the per-segment loop below (MiniCPM3-style kv_b_proj always
+        # loops — its attention is per-head already, not absorbed).
+        n_reqs = len(ctx.context_lens)
+        decode_idx = self._decode_batch_rows(ctx)
+        batched = (
+            self._absorbed_decode_batch(
+                inner, latent_cache, layer_idx, q_nope, q_pe, ctx, decode_idx
             )
-            for req_idx in range(len(ctx.context_lens))
-        ]
+            if decode_idx is not None
+            else None
+        )  # [len(decode_idx), nheads, 1, v_head_dim] in decode_idx order
+        batched_at = {i: j for j, i in enumerate(decode_idx or [])}
+
+        outputs = []
+        for req_idx in range(n_reqs):
+            j = batched_at.get(req_idx)
+            if j is not None:
+                outputs.append(batched[j].reshape(1, 1, -1))
+            else:
+                outputs.append(
+                    self._absorbed_segment(
+                        inner, latent_cache, layer_idx, q_nope, q_pe, ctx, req_idx
+                    )
+                )
 
         final = mx.concatenate(outputs, axis=1) if len(outputs) > 1 else outputs[0]
         return inner.o_proj(final)
