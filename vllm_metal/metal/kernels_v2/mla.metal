@@ -383,14 +383,22 @@ template <typename T, int KV_LORA_RANK, int QK_ROPE_HEAD_DIM, int BLOCK_SIZE,
       uint simd_gid [[simdgroup_index_in_threadgroup]],                        \
       uint simd_lid [[thread_index_in_simdgroup]]);
 
-// G=1 (single-head per TG, NUM_THREADS=1024).
-instantiate_mla(half, 512, 64, 16, 1, 1024, 0);
-instantiate_mla(half, 512, 64, 32, 1, 1024, 0);
-instantiate_mla(bfloat16_t, 512, 64, 16, 1, 1024, 0);
-instantiate_mla(bfloat16_t, 512, 64, 32, 1, 1024, 0);
+// The admitted (kv_lora_rank, qk_rope_head_dim, block_size, heads_per_tg,
+// num_threads, partition_size) rows; kMlaKernelSpecs in paged_ops.cpp must
+// admit exactly this space (checked by test_block_size_translation.py).
+//   G=1 → NUM_THREADS=1024 (32 simdgroups, sdpa_vector layout).
+//   G=2 → NUM_THREADS=512  (16 simdgroups, 2x KV-bandwidth amortization).
+#define MLA_KERNEL_ROWS(X, type)                                        \
+  X(type, 512, 64, 16, 1, 1024, 0)                                      \
+  X(type, 512, 64, 32, 1, 1024, 0)                                      \
+  X(type, 512, 64, 16, 2, 512, 0)                                       \
+  X(type, 512, 64, 32, 2, 512, 0)
 
-// G=2 (2 heads per TG, NUM_THREADS=512). 2× KV-bandwidth amortization.
-instantiate_mla(half, 512, 64, 16, 2, 512, 0);
-instantiate_mla(half, 512, 64, 32, 2, 512, 0);
-instantiate_mla(bfloat16_t, 512, 64, 16, 2, 512, 0);
-instantiate_mla(bfloat16_t, 512, 64, 32, 2, 512, 0);
+#define MLA_INSTANTIATE_ROW(type, kv_lora_rank, qk_rope_head_dim,        \
+                            block_size, heads_per_tg, num_threads,       \
+                            partition_size)                              \
+  instantiate_mla(type, kv_lora_rank, qk_rope_head_dim, block_size,      \
+                  heads_per_tg, num_threads, partition_size);
+
+MLA_KERNEL_ROWS(MLA_INSTANTIATE_ROW, half)
+MLA_KERNEL_ROWS(MLA_INSTANTIATE_ROW, bfloat16_t)

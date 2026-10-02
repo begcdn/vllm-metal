@@ -175,7 +175,7 @@ class TestMLAKernelBlockSizes:
     """MLA_KERNEL_BLOCK_SIZES is the Python-side copy of the block sizes the
     mla.metal single-pass kernel is instantiated for — drift between them
     means the admission check admits a block size with no compiled kernel
-    (or rejects one that exists).  Parse the instantiate_mla calls and keep
+    (or rejects one that exists).  Parse the MLA_KERNEL_ROWS table and keep
     the two in lockstep."""
 
     _MLA_METAL = (
@@ -192,25 +192,40 @@ class TestMLAKernelBlockSizes:
         / "paged_ops.cpp"
     )
 
-    def _instantiations(self) -> set[tuple[str, int, int, int, int, int, int]]:
-        """The full (type, kvr, pe, bs, g, nt, ps) tuple per call site.
+    @staticmethod
+    def _xmacro_rows(src: str, macro: str) -> list[tuple[int, ...]]:
+        """The ``X(type, <ints>)`` rows of an X-macro instantiation table."""
+        body = src[src.index(f"#define {macro}") :]
+        body = body[: body.index("\n\n")]
+        rows = [
+            tuple(int(v) for v in row.split(","))
+            for row in re.findall(r"X\(\s*type\s*,([^)]*)\)", body)
+        ]
+        assert rows, f"could not parse the {macro} table"
+        assert len(rows) == len(set(rows)), f"duplicate rows in {macro}"
+        return rows
 
-        ``instantiate_mla(type, kv_lora_rank, qk_rope_head_dim, block_size,
-        heads_per_tg, num_threads, partition_size)`` — a call at the start
-        of a line; the #define and comments are excluded by that anchor.
+    @staticmethod
+    def _xmacro_dtypes(src: str, macro: str) -> set[str]:
+        """The dtype arguments of ``MACRO(<callback>, <dtype>)`` call sites."""
+        dtypes = set(re.findall(rf"^{macro}\(\w+,\s*(\w+)\)", src, re.M))
+        assert dtypes, f"no {macro} call sites found"
+        return dtypes
+
+    def _instantiations(self) -> set[tuple[str, int, int, int, int, int, int]]:
+        """The full (type, kvr, pe, bs, g, nt, ps) space the library compiles.
+
+        ``MLA_KERNEL_ROWS`` in mla.metal is the single instantiation table —
+        one ``X(type, kvr, pe, bs, g, nt, ps)`` row per shape, expanded once
+        per dtype call site.
         """
         src = self._MLA_METAL.read_text()
-        rows = {
-            (m.group(1), *map(int, m.groups()[1:]))
-            for m in re.finditer(
-                r"^instantiate_mla\(\s*(\w+),\s*(\d+),\s*(\d+),\s*(\d+),"
-                r"\s*(\d+),\s*(\d+),\s*(\d+)\s*\)",
-                src,
-                re.M,
-            )
+        rows = self._xmacro_rows(src, "MLA_KERNEL_ROWS")
+        return {
+            (t, *row)
+            for t in self._xmacro_dtypes(src, "MLA_KERNEL_ROWS")
+            for row in rows
         }
-        assert rows, "no instantiate_mla call sites found in mla.metal"
-        return rows
 
     @staticmethod
     def _fn_body(src: str, signature: str) -> str:
@@ -235,8 +250,10 @@ class TestMLAKernelBlockSizes:
                 table[: table.index("};")],
             )
         }
+        rows = sorted(rows)
         assert rows, "could not parse the kMlaKernelSpecs table"
-        return rows
+        assert len(rows) == len(set(rows)), "duplicate rows in kMlaKernelSpecs"
+        return set(rows)
 
     def test_matches_mla_metal_instantiations(self):
         instantiated = {bs for _, _, _, bs, _, _, _ in self._instantiations()}
@@ -290,8 +307,8 @@ class TestMLAKernelBlockSizes:
 class TestNaxKernelInstantiations:
     """The NAX prefill gate and its kernel instantiations cannot drift.
 
-    ``nax_eligible`` in paged_ops.cpp admits a (dtype, head_size, block_size)
-    space; ``instantiate_paged_attention_nax_all`` in
+    ``nax_eligible`` in paged_ops.cpp admits the (dtype, head_size,
+    block_size) space in ``kNaxKernelSpecs``; ``NAX_KERNEL_ROWS`` in
     pagedattention_nax.metal compiles one specialization per admitted row.
     An instantiation beyond the gate compiles dead binary; a gate value
     without an instantiation dispatches a kernel name that does not exist.
@@ -309,35 +326,33 @@ class TestNaxKernelInstantiations:
     def _instantiations(self) -> set[tuple[str, int, int]]:
         """The (metal-type, head_size, block_size) rows the library compiles.
 
-        Rows live in the ``instantiate_paged_attention_nax_all`` macro body
-        (its ``type`` parameter is bound by the ``..._all(<dtype>)`` call
-        sites below it).
+        ``NAX_KERNEL_ROWS`` in pagedattention_nax.metal is the single
+        instantiation table — one ``X(type, head_size, block_size)`` row per
+        shape, expanded once per dtype call site.
         """
         src = self._NAX_METAL.read_text()
-        body_start = src.index("#define instantiate_paged_attention_nax_all")
-        body_end = src.index("\n\n", body_start)
-        shapes = {
-            (int(hs), int(bs))
-            for hs, bs in re.findall(
-                r"instantiate_paged_attention_nax\(\s*type\s*,\s*(\d+)\s*,"
-                r"\s*(\d+)\s*\)",
-                src[body_start:body_end],
-            )
+        rows = TestMLAKernelBlockSizes._xmacro_rows(src, "NAX_KERNEL_ROWS")
+        return {
+            (t, *row)
+            for t in TestMLAKernelBlockSizes._xmacro_dtypes(src, "NAX_KERNEL_ROWS")
+            for row in rows
         }
-        assert shapes, "no instantiate_paged_attention_nax rows found"
-
-        dtypes = set(
-            re.findall(r"^instantiate_paged_attention_nax_all\((\w+)\);", src, re.M)
-        )
-        assert dtypes, "no instantiate_paged_attention_nax_all call sites found"
-        return {(t, hs, bs) for t in dtypes for hs, bs in shapes}
 
     def test_instantiations_match_the_cpp_gate(self) -> None:
         cpp = self._PAGED_OPS.read_text()
-        gate = TestMLAKernelBlockSizes._fn_body(cpp, "static bool nax_eligible")
 
-        head_sizes = {int(v) for v in re.findall(r"head_size == (\d+)", gate)}
-        block_sizes = {int(v) for v in re.findall(r"block_size == (\d+)", gate)}
+        # kNaxKernelSpecs is the (head_size, block_size) table the gate
+        # admits; the dtype gate is the pair of ``dtype !=`` rejects.
+        table = cpp[cpp.index("kNaxKernelSpecs") :]
+        table = table[: table.index("};")]
+        specs = [
+            (int(hs), int(bs))
+            for hs, bs in re.findall(r"\{\s*(\d+)\s*,\s*(\d+)\s*\}", table)
+        ]
+        assert specs, "could not parse the kNaxKernelSpecs table"
+        assert len(specs) == len(set(specs)), "duplicate rows in kNaxKernelSpecs"
+
+        gate = TestMLAKernelBlockSizes._fn_body(cpp, "static bool nax_eligible")
         dtype_map = dict(
             re.findall(
                 r'case (\w+):\s*return "(\w+)";',
@@ -346,15 +361,8 @@ class TestNaxKernelInstantiations:
                 ),
             )
         )
-        gate_dtypes = {dtype_map[d] for d in re.findall(r"dtype == (\w+)", gate)}
-        for name, parsed in (
-            ("head_size", head_sizes),
-            ("block_size", block_sizes),
-            ("dtype", gate_dtypes),
-        ):
-            assert parsed, f"could not parse the C++ NAX {name} gate"
+        gate_dtypes = {dtype_map[d] for d in re.findall(r"dtype != (\w+)", gate)}
+        assert gate_dtypes, "could not parse the C++ NAX dtype gate"
 
-        expected = {
-            (t, hs, bs) for t in gate_dtypes for hs in head_sizes for bs in block_sizes
-        }
+        expected = {(t, hs, bs) for t in gate_dtypes for hs, bs in specs}
         assert self._instantiations() == expected

@@ -428,22 +428,28 @@ template <typename T, int HEAD_SIZE, int BLOCK_SIZE>
       uint3 tgpg [[threadgroups_per_grid]],                                  \
       uint sg_idx [[simdgroup_index_in_threadgroup]]);
 
-#define instantiate_paged_attention_nax_all(type)                            \
-  instantiate_paged_attention_nax(type, 64, 8);                              \
-  instantiate_paged_attention_nax(type, 64, 16);                             \
-  instantiate_paged_attention_nax(type, 64, 32);                             \
-  instantiate_paged_attention_nax(type, 128, 8);                             \
-  instantiate_paged_attention_nax(type, 128, 16);                            \
-  instantiate_paged_attention_nax(type, 128, 32);                            \
-  instantiate_paged_attention_nax(type, 256, 8);                             \
-  instantiate_paged_attention_nax(type, 256, 16);                            \
-  instantiate_paged_attention_nax(type, 256, 32);                            \
-  instantiate_paged_attention_nax(type, 96, 8);                              \
-  instantiate_paged_attention_nax(type, 96, 16);                             \
-  instantiate_paged_attention_nax(type, 96, 32);                             \
-  instantiate_paged_attention_nax(type, 512, 8);                             \
-  instantiate_paged_attention_nax(type, 512, 16);                            \
-  instantiate_paged_attention_nax(type, 512, 32);
+// The admitted (head_size, block_size) rows; kNaxKernelSpecs in
+// paged_ops.cpp must admit exactly this space (checked by
+// test_block_size_translation.py).
+#define NAX_KERNEL_ROWS(X, type)                                     \
+  X(type, 64, 8)                                                     \
+  X(type, 64, 16)                                                    \
+  X(type, 64, 32)                                                    \
+  X(type, 128, 8)                                                    \
+  X(type, 128, 16)                                                   \
+  X(type, 128, 32)                                                   \
+  X(type, 256, 8)                                                    \
+  X(type, 256, 16)                                                   \
+  X(type, 256, 32)                                                   \
+  X(type, 96, 8)                                                     \
+  X(type, 96, 16)                                                    \
+  X(type, 96, 32)                                                    \
+  X(type, 512, 8)                                                    \
+  X(type, 512, 16)                                                   \
+  X(type, 512, 32)
 
-instantiate_paged_attention_nax_all(half);
-instantiate_paged_attention_nax_all(bfloat16_t);
+#define NAX_INSTANTIATE_ROW(type, head_size, block_size)             \
+  instantiate_paged_attention_nax(type, head_size, block_size);
+
+NAX_KERNEL_ROWS(NAX_INSTANTIATE_ROW, half)
+NAX_KERNEL_ROWS(NAX_INSTANTIATE_ROW, bfloat16_t)

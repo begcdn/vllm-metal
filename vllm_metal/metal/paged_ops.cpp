@@ -315,13 +315,33 @@ void init_nax_library_path(const std::string& path) {
   nax_lib_ready_ = true;
 }
 
-// Match the instantiated NAX shapes; other shapes retain the tiled path.
+struct NaxKernelSpec {
+  int head_size;
+  int block_size;
+};
+
+// The instantiated NAX shapes — NAX_KERNEL_ROWS in pagedattention_nax.metal
+// compiles exactly this space; drift is caught by
+// tests/test_block_size_translation.py. Other shapes retain the tiled path.
+static constexpr NaxKernelSpec kNaxKernelSpecs[] = {
+    {64, 8},   {64, 16},  {64, 32},  //
+    {128, 8},  {128, 16}, {128, 32}, //
+    {256, 8},  {256, 16}, {256, 32}, //
+    {96, 8},   {96, 16},  {96, 32},  //
+    {512, 8},  {512, 16}, {512, 32}, //
+};
+
 static bool nax_eligible(Dtype dtype, int head_size, int block_size) {
-  return nax_lib_ready_ && nax_enabled_ &&
-      (dtype == float16 || dtype == bfloat16) &&
-      (head_size == 64 || head_size == 96 || head_size == 128 ||
-       head_size == 256 || head_size == 512) &&
-      (block_size == 8 || block_size == 16 || block_size == 32);
+  if (!nax_lib_ready_ || !nax_enabled_ ||
+      (dtype != float16 && dtype != bfloat16)) {
+    return false;
+  }
+  for (const auto& spec : kNaxKernelSpecs) {
+    if (spec.head_size == head_size && spec.block_size == block_size) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
