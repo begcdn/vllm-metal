@@ -2884,6 +2884,26 @@ class TestProfileRunDrafterWarmup:
 
         assert len(runner._dummy_encoder_outputs()) == 1
 
+    def test_profile_run_without_a_drafter(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # _drafter is None on non-speculative runs — no warmup call happens.
+        runner = make_stub_runner(
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=4)
+        )
+        runner._dummy_forward_outputs = Mock(return_value=[])
+        assert runner._drafter is None
+        # Repeat the last reading once exhausted so an extra cache read does
+        # not fail with StopIteration.
+        cache_readings = iter([100, 180])
+        monkeypatch.setattr(mr.mx, "clear_cache", lambda: None)
+        monkeypatch.setattr(
+            mr.mx, "get_cache_memory", lambda: next(cache_readings, 180)
+        )
+        monkeypatch.setattr(mr.mx, "set_cache_limit", lambda _n: None)
+
+        assert runner.profile_run() == 80
+
 
 class TestPipelineGateSpecDecodeDerivation:
     """Runner-side capability derivation for the decode pipeline."""
