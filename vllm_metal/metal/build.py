@@ -332,12 +332,14 @@ def _input_hash(spec: _BuildSpec) -> str:
 
 
 def _missing_sentinels() -> list[Path]:
-    """The outputs a complete build leaves behind; any missing means rebuild."""
+    """The outputs a complete build leaves behind; any missing one rebuilds."""
     return [p for p in (_OUT, _HASH, _MLX_VERSION) if not p.exists()]
 
 
 def needs_rebuild() -> bool:
-    if _missing_sentinels():
+    missing = _missing_sentinels()
+    if missing:
+        logger.info("Rebuild required; missing build outputs: %s", missing)
         return True
     try:
         spec = _build_spec()
