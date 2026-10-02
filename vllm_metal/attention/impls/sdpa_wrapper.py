@@ -35,6 +35,20 @@ from vllm_metal.attention.patching import walk_and_wrap
 # ---------------------------------------------------------------------------
 
 
+_sink_casts_pending: list[mx.array] = []
+
+
+def flush_pending_sink_casts() -> None:
+    """Evaluate every sink cast queued by wrapper construction in one call.
+
+    Wrappers record their float32 sink cast here instead of evaluating it
+    individually, so a patch pass over all layers pays one ``mx.eval``.
+    """
+    if _sink_casts_pending:
+        mx.eval(*_sink_casts_pending)
+        _sink_casts_pending.clear()
+
+
 def _is_rope_embedding_pair(value: Any) -> bool:
     """Return True for caller-precomputed RoPE ``(cos, sin)`` embeddings."""
     return (
@@ -84,10 +98,11 @@ class SDPAPagedAttentionWrapper(nn.Module):
         )
         # Warm the float32 sink cache at patch time (GPT-OSS stores fp16/bf16
         # sinks) so the first forward does not pay the cast in the hot path.
-        # The cast is lazy, so evaluate it here to materialize the array now.
+        # The cast is lazy; it is queued so the patch pass evaluates every
+        # layer's cast in a single mx.eval.
         sinks_f32 = _float32_sinks(inner)
         if sinks_f32 is not None:
-            mx.eval(sinks_f32)
+            _sink_casts_pending.append(sinks_f32)
 
     @property
     def rotary_emb(self) -> Any:
@@ -234,4 +249,6 @@ def patch_sdpa_attention(
             attn, layer_idx, kv_cache, block_size, cache_idx=cache_idx
         )
 
-    return walk_and_wrap(model, wrap_layer, only_layers=only_layers)
+    patched = walk_and_wrap(model, wrap_layer, only_layers=only_layers)
+    flush_pending_sink_casts()
+    return patched

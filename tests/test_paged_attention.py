@@ -26,7 +26,10 @@ from vllm_metal.attention.context import (
     prepare_grouped,
     prepare_unified,
 )
-from vllm_metal.attention.impls.sdpa_wrapper import SDPAPagedAttentionWrapper
+from vllm_metal.attention.impls.sdpa_wrapper import (
+    SDPAPagedAttentionWrapper,
+    flush_pending_sink_casts,
+)
 
 
 class TestOffsetCache:
@@ -83,25 +86,39 @@ class TestSDPAPagedAttentionWrapper:
 
     def test_warms_float32_sinks_at_patch_time(self, monkeypatch):
         # Wrapping must cast non-float32 sinks once, before any forward — the
-        # hot path then only reads the cached tensor.
+        # hot path then only reads the cached tensor. The casts across layers
+        # flush in a single mx.eval.
         class _Inner:
             def __init__(self):
                 self.sinks = mx.arange(4, dtype=mx.float16)
 
-        inner = _Inner()
-        assert not hasattr(inner, "_vllm_metal_sinks_f32")
+        inners = [_Inner(), _Inner()]
+        for inner in inners:
+            assert not hasattr(inner, "_vllm_metal_sinks_f32")
+        flush_pending_sink_casts()  # clear casts queued by earlier tests
 
-        # The cast is lazy; patch-time warmup must evaluate it so the first
-        # forward is fully clear of it.
-        evaled = []
-        monkeypatch.setattr(mx, "eval", lambda *args: evaled.extend(args))
+        # The cast is lazy; the patch flush must evaluate all of them in one
+        # call so the first forward is fully clear of it.
+        evals = []
+        monkeypatch.setattr(mx, "eval", lambda *args: evals.append(args))
+        try:
+            [
+                SDPAPagedAttentionWrapper(
+                    inner, layer_idx=i, kv_cache=object(), block_size=16
+                )
+                for i, inner in enumerate(inners)
+            ]
+            assert evals == [], "construction queues the cast, it must not eval"
+            flush_pending_sink_casts()
+        finally:
+            flush_pending_sink_casts()
 
-        SDPAPagedAttentionWrapper(inner, layer_idx=0, kv_cache=object(), block_size=16)
-
-        original, cast = inner._vllm_metal_sinks_f32
-        assert original is inner.sinks
-        assert cast.dtype == mx.float32
-        assert cast in evaled
+        assert len(evals) == 1, "one batched mx.eval for all layers"
+        for inner in inners:
+            original, cast = inner._vllm_metal_sinks_f32
+            assert original is inner.sinks
+            assert cast.dtype == mx.float32
+            assert any(cast is arg for arg in evals[0])
 
     def test_forwards_precomputed_rope_embeddings_without_context(self):
         class _Inner:

@@ -27,6 +27,7 @@ from vllm_metal.attention.impls.mla import (
 from vllm_metal.attention.impls.sdpa import is_sdpa
 from vllm_metal.attention.impls.sdpa_wrapper import (
     SDPAPagedAttentionWrapper,
+    flush_pending_sink_casts,
 )
 from vllm_metal.attention.patching import DEFAULT_ATTN_ATTR_NAMES, walk_and_wrap
 from vllm_metal.attention.runtime.base import PagedAttentionRuntimeBase
@@ -189,12 +190,14 @@ class HybridPagedAttentionRuntime(PagedAttentionRuntimeBase):
             )
 
         # Stateless layers keep their module; only plan-owned layers are probed.
-        return walk_and_wrap(
+        patched = walk_and_wrap(
             model,
             wrap_layer,
             only_layers=[*layer_plan.attention_indices, *layer_plan.state_indices],
             attr_names=(*DEFAULT_ATTN_ATTR_NAMES, self._hybrid_plan.family.layer_name),
         )
+        flush_pending_sink_casts()
+        return patched
 
     @property
     def kv_cache(self) -> MetalPagedKVCache | MLAPagedLatentCache:
