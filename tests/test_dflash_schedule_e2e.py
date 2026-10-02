@@ -5,14 +5,15 @@ import json
 
 import pytest
 
-from tests.test_dflash_serving_e2e import _dflash_llm, _serve, _spawn_env
+from tests.dflash_e2e_helpers import dflash_llm, spawn_env
+from tests.test_dflash_serving_e2e import _serve
 
 
 def _serve_scheduled(baseline_path, verify_window, pressure=False):
-    _spawn_env(verify_window)
+    spawn_env(verify_window)
     from vllm import SamplingParams
 
-    llm = _dflash_llm(
+    llm = dflash_llm(
         max_num_seqs=3,
         num_gpu_blocks_override=10 if pressure else 14,
         speculative_config={
