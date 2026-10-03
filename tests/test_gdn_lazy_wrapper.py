@@ -1153,15 +1153,15 @@ class TestGDNPagedAttentionWrapperLazyKernels:
 
 class TestSplitAndNormalize:
     @pytest.mark.parametrize(
-        "dtype,rtol,atol",
+        "dtype,rtol",
         [
-            (mx.float32, 1e-4, 1e-4),
-            (mx.float16, 2e-3, 1e-3),
-            (mx.bfloat16, 1e-2, 5e-3),
+            (mx.float32, 1e-4),
+            (mx.float16, 2e-3),
+            (mx.bfloat16, 1e-2),
         ],
     )
     def test_q_k_norm_matches_l2norm_with_eps_on_the_sum_of_squares(
-        self, dtype: mx.Dtype, rtol: float, atol: float
+        self, dtype: mx.Dtype, rtol: float
     ) -> None:
         inner = _TinyGDNInner()
         cache = _make_state_cache(
@@ -1200,7 +1200,5 @@ class TestSplitAndNormalize:
         inv_scale = inner.head_k_dim**-0.5
         q_out = np.array(q.astype(mx.float32))
         k_out = np.array(k.astype(mx.float32))
-        np.testing.assert_allclose(
-            q_out, inv_scale * l2norm(q_in), rtol=rtol, atol=atol
-        )
-        np.testing.assert_allclose(k_out, l2norm(k_in), rtol=rtol, atol=atol)
+        np.testing.assert_allclose(q_out, inv_scale * l2norm(q_in), rtol=rtol)
+        np.testing.assert_allclose(k_out, l2norm(k_in), rtol=rtol)
