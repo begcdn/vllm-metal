@@ -32,11 +32,9 @@ def run_in_spawn_process(request):
             assert not process.is_alive(), f"{label}: serving test timed out"
             exitcode = process.exitcode
             if exitcode is not None and exitcode < 0:
-                # Negative codes mean the child died to a signal.
-                try:
-                    detail = f"signal {-exitcode} ({signal.Signals(-exitcode).name})"
-                except ValueError:
-                    detail = f"signal {-exitcode}"
+                # A negative code is the actual terminating OS signal.
+                signum = -exitcode
+                detail = f"signal {signum} ({signal.Signals(signum).name})"
             else:
                 detail = f"exit {exitcode}"
             assert exitcode == 0, f"{label}: child process failed ({detail})"
