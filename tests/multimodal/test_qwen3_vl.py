@@ -583,6 +583,40 @@ class _DeepstackLanguageModel:
         return "deepstack-output"
 
 
+class _RecordingBackbone:
+    """Headless ``language_model.model`` stub for ``call_lm_hidden_states``.
+
+    Declares ``inputs_embeds`` (and the deepstack pair) as named parameters
+    so ``_detect_embeds_kwarg`` sniffs it the same way as the real inner
+    model, and records the kwargs each call receives.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.embed_tokens = lambda input_ids: input_ids
+
+    def __call__(
+        self,
+        inputs: mx.array,
+        inputs_embeds: mx.array | None = None,
+        cache: list[Any] | None = None,
+        position_ids: mx.array | None = None,
+        visual_pos_masks: Any | None = None,
+        deepstack_visual_embeds: Any | None = None,
+    ) -> str:
+        self.calls.append(
+            {
+                "inputs": inputs,
+                "inputs_embeds": inputs_embeds,
+                "cache": cache,
+                "position_ids": position_ids,
+                "visual_pos_masks": visual_pos_masks,
+                "deepstack_visual_embeds": deepstack_visual_embeds,
+            }
+        )
+        return "hidden-states"
+
+
 class _KwargsOnlyLanguageModel:
     """LM with ``inputs_embeds`` plus ``**kwargs`` — qwen3_5 0.4.x shape.
 
@@ -827,6 +861,105 @@ class TestQwen3VLMultimodalAdapterCallLm:
         assert len(lm.calls) == 1
         assert lm.calls[0]["visual_pos_masks"] is None
         assert lm.calls[0]["deepstack_visual_embeds"] is None
+
+
+class TestQwen3VLMultimodalAdapterCallLmHiddenStates:
+    def test_calls_backbone_without_head(self) -> None:
+        lm = _RecordingLanguageModel()
+        backbone = _RecordingBackbone()
+        lm.model = backbone
+        adapter = Qwen3VLMultimodalAdapter(
+            spatial_merge_size=_SPATIAL_MERGE_SIZE,
+            language_model=lm,
+            embeds_kwarg="inputs_embeds",
+        )
+        input_ids = mx.array([[1, 2, 3]], dtype=mx.int32)
+        inputs_embeds = mx.zeros((1, 3, 8), dtype=mx.float32)
+        position_ids = mx.zeros((3, 1, 3), dtype=mx.int32)
+
+        output = adapter.call_lm_hidden_states(
+            input_ids, inputs_embeds, [None], position_ids
+        )
+
+        assert output == "hidden-states"
+        assert lm.calls == []
+        assert len(backbone.calls) == 1
+        call = backbone.calls[0]
+        assert call["inputs_embeds"] is inputs_embeds
+        assert call["position_ids"] is position_ids
+        assert call["cache"] == [None]
+
+    def test_forwards_deepstack_kwargs_when_supported(self) -> None:
+        lm = _DeepstackLanguageModel()
+        backbone = _RecordingBackbone()
+        lm.model = backbone
+        adapter = Qwen3VLMultimodalAdapter(
+            spatial_merge_size=_SPATIAL_MERGE_SIZE,
+            language_model=lm,
+            embeds_kwarg="inputs_embeds",
+            supports_deepstack=True,
+        )
+        visual_pos_masks = mx.array([[True, False, True]])
+        deepstack_visual_embeds = [mx.zeros((1, 2, 8))]
+
+        adapter.call_lm_hidden_states(
+            mx.array([[1, 2, 3]], dtype=mx.int32),
+            mx.zeros((1, 3, 8), dtype=mx.float32),
+            [None],
+            mx.zeros((3, 1, 3), dtype=mx.int32),
+            visual_pos_masks=visual_pos_masks,
+            deepstack_visual_embeds=deepstack_visual_embeds,
+        )
+
+        call = backbone.calls[0]
+        assert call["visual_pos_masks"] is visual_pos_masks
+        assert call["deepstack_visual_embeds"] is deepstack_visual_embeds
+
+    def test_raises_when_unsupported_lm_receives_deepstack_residuals(self) -> None:
+        lm = _KwargsOnlyLanguageModel()
+        lm.model = _RecordingBackbone()
+        adapter = Qwen3VLMultimodalAdapter(
+            spatial_merge_size=_SPATIAL_MERGE_SIZE,
+            language_model=lm,
+            embeds_kwarg="inputs_embeds",
+            supports_deepstack=False,
+        )
+
+        with pytest.raises(RuntimeError, match="deepstack_visual_embeds were produced"):
+            adapter.call_lm_hidden_states(
+                mx.array([[1, 2, 3]], dtype=mx.int32),
+                mx.zeros((1, 3, 8), dtype=mx.float32),
+                [None],
+                mx.zeros((3, 1, 3), dtype=mx.int32),
+                visual_pos_masks=mx.array([[True, False, True]]),
+                deepstack_visual_embeds=[mx.zeros((1, 2, 8))],
+            )
+
+    def test_raises_when_language_model_missing(self) -> None:
+        adapter = Qwen3VLMultimodalAdapter(spatial_merge_size=_SPATIAL_MERGE_SIZE)
+
+        with pytest.raises(RuntimeError, match="language_model not loaded"):
+            adapter.call_lm_hidden_states(
+                mx.array([[1]], dtype=mx.int32),
+                mx.zeros((1, 1, 8), dtype=mx.float32),
+                [None],
+                mx.zeros((3, 1, 1), dtype=mx.int32),
+            )
+
+    def test_raises_when_backbone_missing_or_not_callable(self) -> None:
+        adapter = Qwen3VLMultimodalAdapter(
+            spatial_merge_size=_SPATIAL_MERGE_SIZE,
+            language_model=_RecordingLanguageModel(),
+            embeds_kwarg="inputs_embeds",
+        )
+
+        with pytest.raises(RuntimeError, match="language_model.model"):
+            adapter.call_lm_hidden_states(
+                mx.array([[1]], dtype=mx.int32),
+                mx.zeros((1, 1, 8), dtype=mx.float32),
+                [None],
+                mx.zeros((3, 1, 1), dtype=mx.int32),
+            )
 
 
 class TestQwen3VLMultimodalAdapterFromLoadedModel:

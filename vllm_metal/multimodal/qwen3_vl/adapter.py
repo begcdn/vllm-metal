@@ -285,6 +285,54 @@ class Qwen3VLMultimodalAdapter:
             **extra_kwargs,
         )
 
+    def call_lm_hidden_states(
+        self,
+        input_ids: mx.array,
+        inputs_embeds: mx.array,
+        cache: list[Any],
+        position_ids: mx.array,
+        *,
+        visual_pos_masks: Any | None = None,
+        deepstack_visual_embeds: Any | None = None,
+    ) -> mx.array:
+        """:meth:`call_lm` without the output head: the backbone's final hidden states.
+
+        ``language_model.__call__`` forwards the runner-built ``position_ids``
+        to ``language_model.model`` unchanged, so calling the backbone
+        directly skips only the ``lm_head`` projection.
+        """
+        if self._language_model is None:
+            raise RuntimeError(
+                "language_model not loaded; call_lm_hidden_states unavailable. "
+                "Construct via Qwen3VLMultimodalAdapter.from_loaded_model."
+            )
+        backbone = getattr(self._language_model, "model", None)
+        if backbone is None or not callable(backbone):
+            raise RuntimeError(
+                "language_model.model attribute missing or not callable; "
+                "mlx_vlm version drift detected. Expected the headless "
+                "Qwen3-VL backbone."
+            )
+        extra_kwargs: dict[str, Any] = {}
+        if self._supports_deepstack:
+            extra_kwargs["visual_pos_masks"] = visual_pos_masks
+            extra_kwargs["deepstack_visual_embeds"] = deepstack_visual_embeds
+        elif deepstack_visual_embeds is not None:
+            raise RuntimeError(
+                "deepstack_visual_embeds were produced by the vision tower "
+                "but language_model.__call__ does not declare "
+                f"{self._DEEPSTACK_KWARGS} as explicit parameters; mlx-vlm "
+                "signature mismatch.  Refusing to drop deepstack residuals "
+                "silently."
+            )
+        return backbone(
+            input_ids,
+            cache=cache,
+            position_ids=position_ids,
+            **{self._detect_embeds_kwarg(backbone): inputs_embeds},
+            **extra_kwargs,
+        )
+
     @staticmethod
     def _as_mlx(value: Any) -> Any:
         """Return ``value`` as an MLX array, converting from torch when needed.

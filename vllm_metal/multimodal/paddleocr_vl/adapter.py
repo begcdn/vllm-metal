@@ -212,6 +212,41 @@ class PaddleOCRVLMultimodalAdapter:
             position_ids=position_ids,
         )
 
+    def call_lm_hidden_states(
+        self,
+        input_ids: mx.array,
+        inputs_embeds: mx.array,
+        cache: list[Any],
+        position_ids: mx.array,
+        *,
+        visual_pos_masks: Any | None = None,
+        deepstack_visual_embeds: Any | None = None,
+    ) -> mx.array:
+        """:meth:`call_lm` without the output head: the backbone's final hidden states."""
+        del visual_pos_masks
+        if self._language_model is None:
+            raise RuntimeError(
+                "language_model not loaded; call_lm_hidden_states unavailable. "
+                "Construct via PaddleOCRVLMultimodalAdapter.from_loaded_model."
+            )
+        if deepstack_visual_embeds is not None:
+            raise RuntimeError(
+                "PaddleOCR-VL does not expose deepstack visual residuals."
+            )
+        backbone = getattr(self._language_model, "model", None)
+        if backbone is None or not callable(backbone):
+            raise RuntimeError(
+                "language_model.model attribute missing or not callable; "
+                "mlx_vlm version drift detected. Expected the PaddleOCR "
+                "text backbone."
+            )
+        return backbone(
+            input_ids,
+            inputs_embeds=inputs_embeds,
+            cache=cache,
+            position_ids=position_ids,
+        )
+
     def _validate_image_features_and_collect_grids(
         self,
         features: list[MultiModalFeatureSpec],
