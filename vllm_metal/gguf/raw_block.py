@@ -109,22 +109,44 @@ _Q6K_DEQUANT_SOURCE = """
     out[elem] = static_cast<T>(d * float(sc[within / 16]) * float(q));
 """
 
-_Q2K_QMV_SOURCE = """
-    // One 256-thread threadgroup per row; thread t strides the row's
-    // 16-element groups, decoding each once for all NB batch rows, then a
-    // two-stage reduction per batch row into y[batch, row].
+# Shared QMV skeleton: one 256-thread threadgroup per row. Thread t strides
+# the row's 16-element groups; a per-qtype body decodes each group once and
+# accumulates into acc[NB] for all NB batch rows, then a two-stage reduction
+# per batch row writes y[batch, row].
+_QMV_PROLOGUE = """
     uint row = threadgroup_position_in_grid.x;
     uint t = thread_position_in_threadgroup.x;
     uint blocks_per_row = dims[0];
     uint out_features = dims[1];
     uint total_groups = blocks_per_row * 16;
-    device const uint8_t* rowblocks = blocks + (size_t)row * blocks_per_row * 84;
     float acc[NB];
     for (uint batch = 0; batch < NB; ++batch) acc[batch] = 0.0f;
     for (uint g = t; g < total_groups; g += 256) {
         uint blk = g / 16;
         uint grp = g % 16;
-        device const uint8_t* b = rowblocks + blk * 84;
+"""
+
+_QMV_EPILOGUE = """
+    }
+    threadgroup float shared[8 * NB];
+    uint sg = t / 32;
+    for (uint batch = 0; batch < NB; ++batch) {
+        float ssum = simd_sum(acc[batch]);
+        if ((t & 31) == 0) shared[sg * NB + batch] = ssum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (t < NB) {
+        float total = 0.0f;
+        for (uint i = 0; i < 8; ++i) total += shared[i * NB + t];
+        y[(size_t)t * out_features + row] = total;
+    }
+"""
+
+_Q2K_QMV_SOURCE = (
+    _QMV_PROLOGUE
+    + """
+        device const uint8_t* b =
+            blocks + ((size_t)row * blocks_per_row + blk) * 84;
         uint scm = b[grp];
         float d = float(as_type<half>(((device const uint16_t*)(b + 80))[0]));
         float dmin = float(as_type<half>(((device const uint16_t*)(b + 82))[0]));
@@ -150,38 +172,15 @@ _Q2K_QMV_SOURCE = """
             }
             acc[batch] += s * part - m * xsum;
         }
-    }
-    threadgroup float shared[8 * NB];
-    uint sg = t / 32;
-    for (uint batch = 0; batch < NB; ++batch) {
-        float ssum = simd_sum(acc[batch]);
-        if ((t & 31) == 0) shared[sg * NB + batch] = ssum;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (t < NB) {
-        float total = 0.0f;
-        for (uint i = 0; i < 8; ++i) total += shared[i * NB + t];
-        y[(size_t)t * out_features + row] = total;
-    }
 """
+    + _QMV_EPILOGUE
+)
 
-_Q3K_QMV_SOURCE = """
-    // One 256-thread threadgroup per row; thread t strides the row's
-    // 16-element groups, decoding each once for all NB batch rows, then a
-    // two-stage reduction per batch row into y[batch, row].
-    uint row = threadgroup_position_in_grid.x;
-    uint t = thread_position_in_threadgroup.x;
-    uint blocks_per_row = dims[0];
-    uint out_features = dims[1];
-    uint total_groups = blocks_per_row * 16;
-    device const uint8_t* rowblocks =
-        blocks + (size_t)row * blocks_per_row * 110;
-    float acc[NB];
-    for (uint batch = 0; batch < NB; ++batch) acc[batch] = 0.0f;
-    for (uint g = t; g < total_groups; g += 256) {
-        uint blk = g / 16;
-        uint grp = g % 16;
-        device const uint8_t* b = rowblocks + blk * 110;
+_Q3K_QMV_SOURCE = (
+    _QMV_PROLOGUE
+    + """
+        device const uint8_t* b =
+            blocks + ((size_t)row * blocks_per_row + blk) * 110;
         float d = float(as_type<half>(((device const uint16_t*)(b + 108))[0]));
         uint lo = (grp < 8) ? (b[96 + grp] & 0x0F) : (b[96 + grp - 8] >> 4);
         uint hi = (b[104 + grp % 4] >> (2 * (grp / 4))) & 3;
@@ -206,37 +205,15 @@ _Q3K_QMV_SOURCE = """
             for (uint i = 0; i < 16; ++i) part += xg[i] * w[i];
             acc[batch] += part;
         }
-    }
-    threadgroup float shared[8 * NB];
-    uint sg = t / 32;
-    for (uint batch = 0; batch < NB; ++batch) {
-        float ssum = simd_sum(acc[batch]);
-        if ((t & 31) == 0) shared[sg * NB + batch] = ssum;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (t < NB) {
-        float total = 0.0f;
-        for (uint i = 0; i < 8; ++i) total += shared[i * NB + t];
-        y[(size_t)t * out_features + row] = total;
-    }
 """
+    + _QMV_EPILOGUE
+)
 
-_Q6K_QMV_SOURCE = """
-    // One 256-thread threadgroup per row; thread t strides the row's
-    // 16-element groups, decoding each once for all NB batch rows, then a
-    // two-stage reduction per batch row into y[batch, row].
-    uint row = threadgroup_position_in_grid.x;
-    uint t = thread_position_in_threadgroup.x;
-    uint blocks_per_row = dims[0];
-    uint out_features = dims[1];
-    uint total_groups = blocks_per_row * 16;
-    device const uint8_t* rowblocks = blocks + (size_t)row * blocks_per_row * 210;
-    float acc[NB];
-    for (uint batch = 0; batch < NB; ++batch) acc[batch] = 0.0f;
-    for (uint g = t; g < total_groups; g += 256) {
-        uint blk = g / 16;
-        uint grp = g % 16;
-        device const uint8_t* b = rowblocks + blk * 210;
+_Q6K_QMV_SOURCE = (
+    _QMV_PROLOGUE
+    + """
+        device const uint8_t* b =
+            blocks + ((size_t)row * blocks_per_row + blk) * 210;
         uint half_idx = grp / 8;
         uint e0 = (grp % 8) * 16;
         device const uint8_t* ql = b + half_idx * 64;
@@ -263,20 +240,9 @@ _Q6K_QMV_SOURCE = """
             for (uint i = 0; i < 16; ++i) part += xg[i] * w[i];
             acc[batch] += s * part;
         }
-    }
-    threadgroup float shared[8 * NB];
-    uint sg = t / 32;
-    for (uint batch = 0; batch < NB; ++batch) {
-        float ssum = simd_sum(acc[batch]);
-        if ((t & 31) == 0) shared[sg * NB + batch] = ssum;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (t < NB) {
-        float total = 0.0f;
-        for (uint i = 0; i < 8; ++i) total += shared[i * NB + t];
-        y[(size_t)t * out_features + row] = total;
-    }
 """
+    + _QMV_EPILOGUE
+)
 
 # mlx types metal_kernel's return as a plain object; the callable contract
 # lives in its docs, so the constants carry Any.
@@ -311,7 +277,8 @@ _QMV_KERNELS: dict[GGMLQuantizationType, Any] = {
     for qtype, source in _QMV_SOURCES.items()
 }
 
-# Must match the literal 256 stride and 8-simdgroup reduction in _QMV_SOURCE.
+# Must match the literal 256 stride in _QMV_PROLOGUE and the 8-simdgroup
+# reduction in _QMV_EPILOGUE.
 _KERNEL_THREADGROUP = 256
 
 
