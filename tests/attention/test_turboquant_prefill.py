@@ -396,9 +396,14 @@ def test_admission_thresholds_computed_once_per_step(monkeypatch):
         return real(*args, **kwargs)
 
     monkeypatch.setattr(turboquant_prefill, "min_prefill_tokens", counting)
-    case = build_case(context_lens=(300, 400), qlens=(1, 1))
+    case = build_case(context_lens=(300, 400), qlens=(128, 128))
+    meta = sdpa._kernel_metadata(
+        case.ctx, None, case.ctx.slot_mapping, case.ctx.block_tables, 16
+    )
     for _ in range(3):  # three layers of one forward share one meta
-        case.forward()
+        sdpa._turboquant_prefill_plan(
+            case.ctx, meta, case.ctx.block_tables, 16, 8, 2, 128
+        )
     assert len(calls) == 2  # one per sequence, not two per layer
 
 

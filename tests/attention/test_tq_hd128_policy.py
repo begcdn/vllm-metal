@@ -361,7 +361,15 @@ def test_plan_key_tracks_per_sequence_policy():
     case = build_case(qlens=(64, 64), context_lens=(8192, 8191))
     current = plan_for(case)
     assert current is not None and current.fallback is not None
+    meta = sdpa._kernel_metadata(
+        case.ctx,
+        None,
+        case.ctx.slot_mapping,
+        case.ctx.block_tables,
+        case.cache.block_size,
+    )
     with patch.object(policy, "min_prefill_tokens", return_value=128):
+        meta.tq_prefill_min_tokens.clear()
         assert plan_for(case) is None
     with patch.object(
         policy,
@@ -370,10 +378,12 @@ def test_plan_key_tracks_per_sequence_policy():
             128 if context_len >= 8192 else 64
         ),
     ):
+        meta.tq_prefill_min_tokens.clear()
         reversed_plan = plan_for(case)
     # Both policies have a minimum of 64, but select different request rows.
     assert reversed_plan is not current
     assert reversed_plan.prefill.seq_lens.tolist() == [8191]
+    meta.tq_prefill_min_tokens.clear()
     assert plan_for(case) is current
 
 
