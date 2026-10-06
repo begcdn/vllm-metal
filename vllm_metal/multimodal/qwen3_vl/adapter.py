@@ -85,13 +85,10 @@ class Qwen3VLMultimodalAdapter:
         spatial_merge_size = int(model.config.vision_config.spatial_merge_size)
         embeds_kwarg = cls._detect_embeds_kwarg(language_model)
         backbone = cls._resolve_backbone(language_model)
-        if not callable(backbone):
-            raise RuntimeError(
-                "language_model.model is not callable; mlx_vlm version "
-                "drift detected.  Expected the headless Qwen3-VL backbone."
-            )
+        backbone_embeds_kwarg = (
+            cls._detect_embeds_kwarg(backbone) if callable(backbone) else None
+        )
         embed_tokens_fn = cls._resolve_embed_tokens(language_model)
-        backbone_embeds_kwarg = cls._detect_embeds_kwarg(backbone)
         supports_deepstack = cls._detect_deepstack_kwargs(language_model)
         return cls(
             spatial_merge_size=spatial_merge_size,
