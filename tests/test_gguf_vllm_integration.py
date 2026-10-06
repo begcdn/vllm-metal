@@ -558,11 +558,10 @@ def test_remote_load_source_rejects_unsupported_tag_before_download(
             )
         )
 
+    supported = ", ".join(sorted(gguf_source._SUPPORTED_REMOTE_TAGS))
     assert str(excinfo.value) == (
         "Remote GGUF tag 'UD-Q4_K_XL' is not supported by vllm-metal; "
-        "supported tags: BF16, F16, F32, Q2_K, Q2_K_L, Q2_K_M, Q2_K_S, Q3_K, "
-        "Q3_K_L, Q3_K_M, Q3_K_S, Q4_0, Q4_1, Q4_K_L, Q4_K_M, Q4_K_S, Q5_0, "
-        "Q5_1, Q5_K_L, Q5_K_M, Q5_K_S, Q6_K, Q6_K_L, Q8_0."
+        f"supported tags: {supported}."
     )
 
 
