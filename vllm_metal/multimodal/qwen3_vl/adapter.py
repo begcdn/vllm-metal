@@ -57,6 +57,8 @@ class Qwen3VLMultimodalAdapter:
         embeds_kwarg: str | None = None,
         embed_tokens_fn: Callable[[Any], Any] | None = None,
         supports_deepstack: bool = False,
+        backbone: Any | None = None,
+        backbone_embeds_kwarg: str | None = None,
     ) -> None:
         if spatial_merge_size <= 0:
             raise ValueError(
@@ -68,6 +70,8 @@ class Qwen3VLMultimodalAdapter:
         self._embeds_kwarg = embeds_kwarg
         self._embed_tokens_fn = embed_tokens_fn
         self._supports_deepstack = supports_deepstack
+        self._backbone = backbone
+        self._backbone_embeds_kwarg = backbone_embeds_kwarg
 
     def text_model(self) -> Any:
         """Return the loaded Qwen3-VL language model."""
@@ -80,7 +84,14 @@ class Qwen3VLMultimodalAdapter:
         language_model = model.language_model
         spatial_merge_size = int(model.config.vision_config.spatial_merge_size)
         embeds_kwarg = cls._detect_embeds_kwarg(language_model)
+        backbone = cls._resolve_backbone(language_model)
+        if not callable(backbone):
+            raise RuntimeError(
+                "language_model.model is not callable; mlx_vlm version "
+                "drift detected.  Expected the headless Qwen3-VL backbone."
+            )
         embed_tokens_fn = cls._resolve_embed_tokens(language_model)
+        backbone_embeds_kwarg = cls._detect_embeds_kwarg(backbone)
         supports_deepstack = cls._detect_deepstack_kwargs(language_model)
         return cls(
             spatial_merge_size=spatial_merge_size,
@@ -89,11 +100,13 @@ class Qwen3VLMultimodalAdapter:
             embeds_kwarg=embeds_kwarg,
             embed_tokens_fn=embed_tokens_fn,
             supports_deepstack=supports_deepstack,
+            backbone=backbone,
+            backbone_embeds_kwarg=backbone_embeds_kwarg,
         )
 
     @classmethod
-    def _resolve_embed_tokens(cls, language_model: Any) -> Callable[[Any], Any]:
-        """Return ``language_model.model.embed_tokens`` or raise.
+    def _resolve_backbone(cls, language_model: Any) -> Any:
+        """Return ``language_model.model`` or raise.
 
         Resolving at load time turns any rename/restructure into a clear
         init-time error instead of an attribute-error mid-forward.
@@ -105,6 +118,12 @@ class Qwen3VLMultimodalAdapter:
                 "drift detected.  Expected the bottom-level LM module that "
                 "exposes embed_tokens."
             )
+        return inner
+
+    @classmethod
+    def _resolve_embed_tokens(cls, language_model: Any) -> Callable[[Any], Any]:
+        """Return ``language_model.model.embed_tokens`` or raise."""
+        inner = cls._resolve_backbone(language_model)
         embed_tokens = getattr(inner, "embed_tokens", None)
         if embed_tokens is None or not callable(embed_tokens):
             raise RuntimeError(
@@ -265,11 +284,26 @@ class Qwen3VLMultimodalAdapter:
                 "Qwen3VLMultimodalAdapter.from_loaded_model so the language "
                 "model signature is sniffed at load time."
             )
-        extra_kwargs: dict[str, Any] = {}
+        return self._language_model(
+            input_ids,
+            cache=cache,
+            position_ids=position_ids,
+            **{self._embeds_kwarg: inputs_embeds},
+            **self._deepstack_kwargs(visual_pos_masks, deepstack_visual_embeds),
+        )
+
+    def _deepstack_kwargs(
+        self,
+        visual_pos_masks: Any | None,
+        deepstack_visual_embeds: Any | None,
+    ) -> dict[str, Any]:
+        """Deepstack kwargs for the LM call, gated on the sniffed signature."""
         if self._supports_deepstack:
-            extra_kwargs["visual_pos_masks"] = visual_pos_masks
-            extra_kwargs["deepstack_visual_embeds"] = deepstack_visual_embeds
-        elif deepstack_visual_embeds is not None:
+            return {
+                "visual_pos_masks": visual_pos_masks,
+                "deepstack_visual_embeds": deepstack_visual_embeds,
+            }
+        if deepstack_visual_embeds is not None:
             raise RuntimeError(
                 "deepstack_visual_embeds were produced by the vision tower "
                 "but language_model.__call__ does not declare "
@@ -277,13 +311,7 @@ class Qwen3VLMultimodalAdapter:
                 "signature mismatch.  Refusing to drop deepstack residuals "
                 "silently."
             )
-        return self._language_model(
-            input_ids,
-            cache=cache,
-            position_ids=position_ids,
-            **{self._embeds_kwarg: inputs_embeds},
-            **extra_kwargs,
-        )
+        return {}
 
     def call_lm_hidden_states(
         self,
@@ -301,36 +329,22 @@ class Qwen3VLMultimodalAdapter:
         to ``language_model.model`` unchanged, so calling the backbone
         directly skips only the ``lm_head`` projection.
         """
-        if self._language_model is None:
+        if (
+            self._backbone is None
+            or not callable(self._backbone)
+            or self._backbone_embeds_kwarg is None
+        ):
             raise RuntimeError(
-                "language_model not loaded; call_lm_hidden_states unavailable. "
-                "Construct via Qwen3VLMultimodalAdapter.from_loaded_model."
+                "backbone not resolved; call_lm_hidden_states unavailable. "
+                "Construct via Qwen3VLMultimodalAdapter.from_loaded_model so "
+                "the language model backbone is sniffed at load time."
             )
-        backbone = getattr(self._language_model, "model", None)
-        if backbone is None or not callable(backbone):
-            raise RuntimeError(
-                "language_model.model attribute missing or not callable; "
-                "mlx_vlm version drift detected. Expected the headless "
-                "Qwen3-VL backbone."
-            )
-        extra_kwargs: dict[str, Any] = {}
-        if self._supports_deepstack:
-            extra_kwargs["visual_pos_masks"] = visual_pos_masks
-            extra_kwargs["deepstack_visual_embeds"] = deepstack_visual_embeds
-        elif deepstack_visual_embeds is not None:
-            raise RuntimeError(
-                "deepstack_visual_embeds were produced by the vision tower "
-                "but language_model.__call__ does not declare "
-                f"{self._DEEPSTACK_KWARGS} as explicit parameters; mlx-vlm "
-                "signature mismatch.  Refusing to drop deepstack residuals "
-                "silently."
-            )
-        return backbone(
+        return self._backbone(
             input_ids,
             cache=cache,
             position_ids=position_ids,
-            **{self._detect_embeds_kwarg(backbone): inputs_embeds},
-            **extra_kwargs,
+            **{self._backbone_embeds_kwarg: inputs_embeds},
+            **self._deepstack_kwargs(visual_pos_masks, deepstack_visual_embeds),
         )
 
     @staticmethod

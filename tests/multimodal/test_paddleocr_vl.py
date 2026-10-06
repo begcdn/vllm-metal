@@ -182,6 +182,7 @@ def _adapter(
         visual=visual,
         language_model=language_model,
         embed_tokens_fn=language_model.model.embed_tokens,
+        backbone=language_model.model,
     )
 
 
