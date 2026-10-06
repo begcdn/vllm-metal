@@ -219,6 +219,12 @@ class KVCacheStorage:
             )
         if not rows:
             return
+        for i, page_rows in enumerate(rows):
+            if page_rows.shape[0] != len(block_ids):
+                raise ValueError(
+                    f"scatter_rows row array {i} has {page_rows.shape[0]} "
+                    f"rows for {len(block_ids)} block_ids"
+                )
         from vllm_metal.metal import get_ops
 
         dst = mx.array(block_ids, dtype=mx.int32)

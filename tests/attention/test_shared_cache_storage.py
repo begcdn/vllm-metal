@@ -160,6 +160,14 @@ def test_scatter_rows_rejects_row_count_mismatch():
         storage.scatter_rows(rows, [0])
 
 
+def test_scatter_rows_rejects_row_leading_dim_mismatch():
+    storage = make_storage(num_blocks=4)
+    dst = [1, 3]
+    rows = [mx.zeros((1, 1), dtype=mx.uint8) for _ in storage.pages]
+    with pytest.raises(ValueError, match="1 rows for 2 block_ids"):
+        storage.scatter_rows(rows, dst)
+
+
 def test_packed_kv_store_preserves_strides_and_shared_backing():
     storage = make_storage()
     cache = MetalPagedKVCache.from_upstream(storage, ["a0", "a1"])
