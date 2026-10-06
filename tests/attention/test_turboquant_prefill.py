@@ -28,7 +28,7 @@ from vllm_metal.attention.context import (
     get_context,
     prepare_grouped,
 )
-from vllm_metal.attention.impls import sdpa
+from vllm_metal.attention.impls import sdpa, turboquant_prefill
 from vllm_metal.attention.impls.turboquant_prefill import (
     unsupported_reason,
     workspace_upper_bound,
@@ -385,6 +385,21 @@ def test_prefill_metadata_reused_only_within_forward(recorded_ops):
     fresh = next(iter(case.ctx.kernel_metadata_cache.values()))
     assert fresh is not meta
     assert next(iter(fresh.tq_prefill_plans.values())) is not plan
+
+
+def test_admission_thresholds_computed_once_per_step(monkeypatch):
+    calls = []
+    real = turboquant_prefill.min_prefill_tokens
+
+    def counting(*args, **kwargs):
+        calls.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(turboquant_prefill, "min_prefill_tokens", counting)
+    case = build_case(context_lens=(300, 400), qlens=(1, 1))
+    for _ in range(3):  # three layers of one forward share one meta
+        case.forward()
+    assert len(calls) == 2  # one per sequence, not two per layer
 
 
 @pytest.mark.parametrize("block_size", [16, 544])

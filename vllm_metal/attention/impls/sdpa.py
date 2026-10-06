@@ -150,6 +150,11 @@ class _KernelMetadata:
     tq_prefill_plans: dict[tuple[int, ...], _TurboQuantPrefillPlan | None] = field(
         default_factory=dict
     )
+    # Admission thresholds depend only on head geometry, quant format and the
+    # forward-fixed context lengths, so each layer can reuse them.
+    tq_prefill_min_tokens: dict[tuple[object, ...], tuple[int, ...]] = field(
+        default_factory=dict
+    )
     tq_prefill_workspace_bytes: int = 0
 
 
