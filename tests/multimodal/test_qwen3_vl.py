@@ -1049,6 +1049,24 @@ class TestQwen3VLMultimodalAdapterFromLoadedModel:
 
         assert adapter._supports_deepstack is True
 
+    def test_requires_callable_backbone(self) -> None:
+        # ``language_model.model`` must be the callable headless backbone:
+        # the runner routes hidden-state calls to it, so a non-module shape
+        # must fail at load rather than on the first request.
+        class _LoadedModel:
+            class _Config:
+                class _VisionConfig:
+                    spatial_merge_size = 2
+
+                vision_config = _VisionConfig()
+
+            config = _Config()
+            vision_tower = _RecordingVisionTower()
+            language_model = _LegacyLanguageModel()
+
+        with pytest.raises(RuntimeError, match="not callable"):
+            Qwen3VLMultimodalAdapter.from_loaded_model(_LoadedModel())
+
 
 class TestQwen3VLMultimodalAdapterResolveEmbedTokens:
     def test_returns_inner_embed_tokens_callable(self) -> None:

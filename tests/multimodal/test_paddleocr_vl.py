@@ -556,6 +556,7 @@ class TestPaddleOCRVLMultimodalAdapterCallLmHiddenStates:
 class TestPaddleOCRVLMultimodalAdapterFromLoadedModel:
     def test_from_loaded_model_resolves_components(self) -> None:
         language_model = _RecordingLanguageModel()
+        language_model.model = _RecordingBackbone()
         visual = _RecordingVisual()
         model = SimpleNamespace(
             config=SimpleNamespace(
@@ -570,6 +571,18 @@ class TestPaddleOCRVLMultimodalAdapterFromLoadedModel:
         assert adapter.text_model() is language_model
         input_ids = mx.array([[1]], dtype=mx.int32)
         assert adapter.embed_tokens(input_ids).tolist() == [[2]]
+
+    def test_from_loaded_model_requires_callable_backbone(self) -> None:
+        model = SimpleNamespace(
+            config=SimpleNamespace(
+                vision_config=SimpleNamespace(spatial_merge_size=2),
+            ),
+            visual=_RecordingVisual(),
+            language_model=_RecordingLanguageModel(),
+        )
+
+        with pytest.raises(RuntimeError, match="not callable"):
+            PaddleOCRVLMultimodalAdapter.from_loaded_model(model)
 
     def test_requires_explicit_positions(self) -> None:
         # PaddleOCR-VL's LM derives positions from model-level state, so

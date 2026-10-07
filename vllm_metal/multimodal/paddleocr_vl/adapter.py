@@ -59,6 +59,11 @@ class PaddleOCRVLMultimodalAdapter:
         language_model = model.language_model
         spatial_merge_size = int(model.config.vision_config.spatial_merge_size)
         backbone = cls._resolve_backbone(language_model)
+        if not callable(backbone):
+            raise RuntimeError(
+                "language_model.model is not callable; mlx_vlm version "
+                "drift detected. Expected the PaddleOCR text backbone."
+            )
         embed_tokens_fn = cls._resolve_embed_tokens(language_model)
         return cls(
             spatial_merge_size=spatial_merge_size,
