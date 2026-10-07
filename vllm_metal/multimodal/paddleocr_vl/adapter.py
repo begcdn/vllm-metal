@@ -11,6 +11,10 @@ import torch
 from vllm.multimodal.inputs import MultiModalKwargsItem
 
 from vllm_metal.multimodal.feature_spec import MultiModalFeatureSpec
+from vllm_metal.multimodal.text_backbone import (
+    resolve_backbone_embed_tokens,
+    resolve_text_backbone,
+)
 from vllm_metal.pytorch_backend.tensor_bridge import torch_to_mlx
 
 
@@ -32,6 +36,10 @@ class PaddleOCRVLMultimodalAdapter:
     paged text path would re-derive positions from zero-offset caches
     (arange from 0), so every batch — text-only included — must carry
     runner-built ``position_ids`` via the multimodal forward."""
+
+    text_path_selective_logits_ok: bool = True
+    """``text_model()`` is the very object the runner profiles for the
+    split backbone/head path."""
 
     def __init__(
         self,
@@ -58,7 +66,7 @@ class PaddleOCRVLMultimodalAdapter:
         visual = model.visual
         language_model = model.language_model
         spatial_merge_size = int(model.config.vision_config.spatial_merge_size)
-        backbone = cls._resolve_backbone(language_model)
+        backbone = resolve_text_backbone(language_model, owner="mlx_vlm")
         if not callable(backbone):
             raise RuntimeError(
                 "language_model.model is not callable; mlx_vlm version "
@@ -73,26 +81,11 @@ class PaddleOCRVLMultimodalAdapter:
             backbone=backbone,
         )
 
-    @staticmethod
-    def _resolve_backbone(language_model: Any) -> Any:
-        inner = getattr(language_model, "model", None)
-        if inner is None:
-            raise RuntimeError(
-                "language_model.model attribute missing; mlx_vlm version "
-                "drift detected. Expected the PaddleOCR text backbone."
-            )
-        return inner
-
     @classmethod
     def _resolve_embed_tokens(cls, language_model: Any) -> Any:
-        inner = cls._resolve_backbone(language_model)
-        embed_tokens = getattr(inner, "embed_tokens", None)
-        if embed_tokens is None or not callable(embed_tokens):
-            raise RuntimeError(
-                "language_model.model.embed_tokens missing or not callable; "
-                "mlx_vlm version drift detected."
-            )
-        return embed_tokens
+        return resolve_backbone_embed_tokens(
+            resolve_text_backbone(language_model, owner="mlx_vlm"), owner="mlx_vlm"
+        )
 
     def text_model(self) -> Any:
         return self._language_model

@@ -1130,3 +1130,15 @@ class TestAdapterCapabilities:
         # (apply_packed_rope + ctx.offsets), so text-only batches stay on
         # the plain text path.
         assert Qwen3VLMultimodalAdapter.requires_explicit_positions is False
+
+    def test_text_path_selective_logits_flag(self) -> None:
+        # ``text_model()`` returns the very object the runner's
+        # ``supports_selective_logits`` probe exercises, so text-only
+        # batches may select rows — the gate ``call_lm_hidden_states``
+        # rides on.
+        assert Qwen3VLMultimodalAdapter.text_path_selective_logits_ok is True
+
+        from vllm_metal.v1.model_runner import text_path_selective_logits_allowed
+
+        adapter = Qwen3VLMultimodalAdapter(spatial_merge_size=2)
+        assert text_path_selective_logits_allowed(True, adapter) is True

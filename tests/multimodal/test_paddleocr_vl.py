@@ -588,3 +588,14 @@ class TestPaddleOCRVLMultimodalAdapterFromLoadedModel:
         # PaddleOCR-VL's LM derives positions from model-level state, so
         # the runner must route text-only batches through the mm forward.
         assert PaddleOCRVLMultimodalAdapter.requires_explicit_positions is True
+
+    def test_text_path_selective_logits_flag(self) -> None:
+        # ``text_model()`` returns the very object the runner's
+        # ``supports_selective_logits`` probe exercises, so the gate
+        # ``call_lm_hidden_states`` rides on stays open.
+        assert PaddleOCRVLMultimodalAdapter.text_path_selective_logits_ok is True
+
+        from vllm_metal.v1.model_runner import text_path_selective_logits_allowed
+
+        adapter = PaddleOCRVLMultimodalAdapter(spatial_merge_size=2)
+        assert text_path_selective_logits_allowed(True, adapter) is True

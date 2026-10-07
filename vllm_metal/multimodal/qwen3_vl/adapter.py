@@ -15,6 +15,10 @@ import torch
 from vllm.multimodal.inputs import MultiModalKwargsItem
 
 from vllm_metal.multimodal.feature_spec import MultiModalFeatureSpec
+from vllm_metal.multimodal.text_backbone import (
+    resolve_backbone_embed_tokens,
+    resolve_text_backbone,
+)
 from vllm_metal.pytorch_backend.tensor_bridge import torch_to_mlx
 
 
@@ -37,6 +41,10 @@ class Qwen3VLMultimodalAdapter:
     """Qwen3-VL attention applies RoPE from the paged context
     (``apply_packed_rope`` + ``ctx.offsets``), so text-only batches are
     safe on the plain text path."""
+
+    text_path_selective_logits_ok: bool = True
+    """``text_model()`` is the very object the runner profiles for the
+    split backbone/head path."""
 
     _SUPPORTED_EMBEDS_KWARGS: tuple[str, ...] = (
         "inputs_embeds",
@@ -84,7 +92,7 @@ class Qwen3VLMultimodalAdapter:
         language_model = model.language_model
         spatial_merge_size = int(model.config.vision_config.spatial_merge_size)
         embeds_kwarg = cls._detect_embeds_kwarg(language_model)
-        backbone = cls._resolve_backbone(language_model)
+        backbone = resolve_text_backbone(language_model, owner="mlx_vlm")
         if not callable(backbone):
             raise RuntimeError(
                 "language_model.model is not callable; mlx_vlm version "
@@ -105,32 +113,11 @@ class Qwen3VLMultimodalAdapter:
         )
 
     @classmethod
-    def _resolve_backbone(cls, language_model: Any) -> Any:
-        """Return ``language_model.model`` or raise.
-
-        Resolving at load time turns any rename/restructure into a clear
-        init-time error instead of an attribute-error mid-forward.
-        """
-        inner = getattr(language_model, "model", None)
-        if inner is None:
-            raise RuntimeError(
-                "language_model.model attribute missing; mlx_vlm version "
-                "drift detected.  Expected the bottom-level LM module that "
-                "exposes embed_tokens."
-            )
-        return inner
-
-    @classmethod
     def _resolve_embed_tokens(cls, language_model: Any) -> Callable[[Any], Any]:
         """Return ``language_model.model.embed_tokens`` or raise."""
-        inner = cls._resolve_backbone(language_model)
-        embed_tokens = getattr(inner, "embed_tokens", None)
-        if embed_tokens is None or not callable(embed_tokens):
-            raise RuntimeError(
-                "language_model.model.embed_tokens missing or not callable; "
-                "mlx_vlm version drift detected."
-            )
-        return embed_tokens
+        return resolve_backbone_embed_tokens(
+            resolve_text_backbone(language_model, owner="mlx_vlm"), owner="mlx_vlm"
+        )
 
     @classmethod
     def _detect_embeds_kwarg(cls, language_model: Any) -> str:
@@ -151,7 +138,7 @@ class Qwen3VLMultimodalAdapter:
             if candidate in params:
                 return candidate
         raise RuntimeError(
-            "language_model.__call__ accepts none of "
+            "The sniffed callable accepts none of "
             f"{cls._SUPPORTED_EMBEDS_KWARGS}; mlx_vlm version drift detected. "
             f"Got parameters: {sorted(params)}"
         )
