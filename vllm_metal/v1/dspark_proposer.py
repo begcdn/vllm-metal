@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from numbers import Integral
 from typing import TYPE_CHECKING
 
 import mlx.core as mx
@@ -43,7 +44,7 @@ class DSparkProposer(BlockDraftProposer):
         *,
         num_draft_tokens: int,
         controller: SpeculativeDecodeController,
-        draft_topk: int | None = None,
+        draft_topk: Integral | None = None,
         enable_prefix_caching: bool = False,
     ) -> None:
         model.validate_draft_topk(draft_topk, model.config.backbone.vocab_size)
@@ -54,7 +55,7 @@ class DSparkProposer(BlockDraftProposer):
             enable_prefix_caching=enable_prefix_caching,
         )
         self.draft_model = model
-        self.draft_topk = draft_topk
+        self.draft_topk = None if draft_topk is None else int(draft_topk)
 
     @classmethod
     def build(cls, runner: MetalModelRunner) -> DSparkProposer:

@@ -146,6 +146,8 @@ def test_candidate_limit_resolves_explicit_option_before_checkpoint(
     monkeypatch.setattr(dspark_proposer, "load_dspark", load)
     proposer = DSparkProposer.build(runner)
     assert proposer.draft_topk == expected
+    if expected is not None:
+        assert type(proposer.draft_topk) is int
     assert proposer.max_model_len == 32
     assert isinstance(proposer.draft_model.lm_head, nn.QuantizedLinear) == quantized
 

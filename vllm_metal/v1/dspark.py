@@ -257,7 +257,7 @@ class DSparkModel(nn.Module):
         hidden: mx.array,
         anchors: mx.array,
         *,
-        draft_topk: int | None = None,
+        draft_topk: Integral | None = None,
         corrected_logits: bool = True,
     ) -> tuple[mx.array, mx.array | None, mx.array | None]:
         """Return token IDs, corrected logits, and optional raw confidence logits.
@@ -349,7 +349,7 @@ class DSparkModel(nn.Module):
         features: Sequence[mx.array],
         *,
         num_draft_tokens: int,
-        draft_topk: int | None = None,
+        draft_topk: Integral | None = None,
         corrected_logits: bool = True,
     ) -> tuple[mx.array, mx.array | None, mx.array | None]:
         hidden = self.block_hidden(anchors, features, num_draft_tokens=num_draft_tokens)
@@ -361,11 +361,11 @@ class DSparkModel(nn.Module):
         )
 
     @staticmethod
-    def validate_draft_topk(draft_topk: int | None, vocab_size: int) -> None:
+    def validate_draft_topk(draft_topk: Integral | None, vocab_size: int) -> None:
         if draft_topk is not None and (
             isinstance(draft_topk, bool)
             or not isinstance(draft_topk, Integral)
-            or not 1 <= draft_topk <= vocab_size
+            or not 1 <= int(draft_topk) <= vocab_size
         ):
             raise ValueError(
                 f"DSpark draft_topk must be an integer in [1, {vocab_size}], "

@@ -2,6 +2,7 @@
 """DSpark proposals over scheduler-owned committed and lookahead draft KV."""
 
 from collections.abc import Callable, Sequence
+from numbers import Integral
 
 import mlx.core as mx
 
@@ -35,7 +36,7 @@ class DSparkPagedCache(BlockDraftPagedCache):
         self,
         *,
         num_draft_tokens: int,
-        draft_topk: int | None = None,
+        draft_topk: Integral | None = None,
         corrected_logits: bool = True,
     ) -> Callable[
         [mx.array, Sequence[tuple[Sequence[int], int]]],
